@@ -451,9 +451,9 @@ class GiveawaySetupView(discord.ui.View):
 # UI — TICKETS
 # ============================================================
 TICKET_TOPICS = [
-    discord.SelectOption(label="🔨 Contactez le staff", description="Poser une question au staff ou autre...", emoji="⚙️"),
-    discord.SelectOption(label="🤝 Partenariat", description="Demande un partenaritat...", emoji="❓"),
-    discord.SelectOption(label="📩 Autre...", description="Autre demande non inclus...", emoji="📩"),
+    discord.SelectOption(label="🔨 Contactez le staff", description="Poser une question au staff ou autre...", emoji=" "),
+    discord.SelectOption(label="🤝 Partenariat", description="Demande un partenaritat...", emoji=" "),
+    discord.SelectOption(label="📩 Autre...", description="Autre demande non inclus...", emoji=" "),
 ]
 
 
