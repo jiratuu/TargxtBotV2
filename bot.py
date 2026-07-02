@@ -451,12 +451,9 @@ class GiveawaySetupView(discord.ui.View):
 # UI — TICKETS
 # ============================================================
 TICKET_TOPICS = [
-    discord.SelectOption(label="💬 Question générale", description="Poser une question au staff", emoji="❓"),
-    discord.SelectOption(label="🔨 Problème technique", description="Problème avec le serveur ou le bot", emoji="⚙️"),
-    discord.SelectOption(label="👤 Signalement membre", description="Signaler un membre du serveur", emoji="🚨"),
-    discord.SelectOption(label="💰 Paiements & Rangs", description="Question sur les achats, rangs, permissions", emoji="💎"),
-    discord.SelectOption(label="💡 Suggestion", description="Proposer une idée pour le serveur", emoji="💡"),
-    discord.SelectOption(label="📩 Autre", description="Autre demande", emoji="📩"),
+    discord.SelectOption(label="🔨 Contactez le staff", description="Poser une question au staff ou autre...", emoji="⚙️"),
+    discord.SelectOption(label="🤝 Partenariat", description="Demande un partenaritat...", emoji="❓"),
+    discord.SelectOption(label="📩 Autre...", description="Autre demande non inclus...", emoji="📩"),
 ]
 
 
@@ -519,7 +516,7 @@ class TicketSubjectSelect(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
 
-    @discord.ui.select(placeholder="🎯 Choisis le sujet de ton ticket...", options=TICKET_TOPICS)
+    @discord.ui.select(placeholder="Choisis le sujet de ton ticket...", options=TICKET_TOPICS)
     async def select_subject(self, interaction: discord.Interaction, select: discord.ui.Select):
         await interaction.response.send_modal(TicketDescriptionModal(select.values[0]))
 
