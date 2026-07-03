@@ -83,6 +83,7 @@ class Store:
 
 sanctions_store = Store("sanctions.json")
 ticket_store = Store("ticket_config.json")
+tickets_store = Store("tickets.json")
 giveaway_store = Store("giveaways.json")
 
 
@@ -138,32 +139,34 @@ class SanctionManager:
 # ============================================================
 # TICKETS — Configuration
 # ============================================================
-class TicketConfigManager:
-    @staticmethod
-    def get(guild_id: int) -> dict:
-        return ticket_store.read().get(str(guild_id), {})
+
+class TicketManager:
 
     @staticmethod
-    def set(guild_id: int, key: str, value):
-        gid = str(guild_id)
-        def mutate(data):
-            data.setdefault(gid, {})[key] = value
-        ticket_store.update(mutate)
+    def has_ticket(user_id: int):
+        data = tickets_store.read()
+        return str(user_id) in data
 
     @staticmethod
-    def set_multi(guild_id: int, values: dict):
-        gid = str(guild_id)
-        def mutate(data):
-            data.setdefault(gid, {}).update(values)
-        ticket_store.update(mutate)
+    def get(user_id: int):
+        return tickets_store.read().get(str(user_id))
 
+    @staticmethod
+    def create(user_id: int, channel_id: int):
+        def update(data):
+            data[str(user_id)] = {
+                "owner": user_id,
+                "channel": channel_id
+            }
 
-async def send_dm(user: discord.abc.User, embed: discord.Embed):
-    try:
-        await user.send(embed=embed)
-    except discord.HTTPException:
-        pass
+        tickets_store.update(update)
 
+    @staticmethod
+    def delete(user_id: int):
+        def update(data):
+            data.pop(str(user_id), None)
+
+        tickets_store.update(update)
 
 # ============================================================
 # GIVEAWAYS
