@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from discord.ui import View, Select, ChannelSelect, RoleSelect, TextInput, Button
+from discord.ui import View, Select, ChannelSelect, RoleSelect, TextInput
 import json
 import os
 import asyncio
@@ -45,6 +45,7 @@ TIME_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
 def parse_duration(value: str):
+    """Convertit '10m', '2h', etc. en secondes. Renvoie None si invalide."""
     value = value.strip().lower()
     if not value or value[-1] not in TIME_UNITS:
         return None
@@ -58,9 +59,11 @@ def parse_duration(value: str):
 
 
 # ============================================================
-# STOCKAGE
+# GESTIONNAIRE DE STOCKAGE (classe unique pour tous les JSON)
 # ============================================================
 class Store:
+    """Petit wrapper autour de fichiers JSON pour centraliser la persistance."""
+
     def __init__(self, path: str):
         self.path = path
 
@@ -75,6 +78,7 @@ class Store:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
     def update(self, mutator):
+        """Applique une fonction de mutation sur les données puis sauvegarde."""
         data = self.read()
         result = mutator(data)
         self.write(data)
@@ -83,12 +87,11 @@ class Store:
 
 sanctions_store = Store("sanctions.json")
 ticket_store = Store("ticket_config.json")
-tickets_store = Store("tickets.json")
 giveaway_store = Store("giveaways.json")
 
 
 # ============================================================
-# SANCTIONS
+# SANCTIONS — logique métier
 # ============================================================
 class SanctionManager:
     @staticmethod
@@ -98,6 +101,7 @@ class SanctionManager:
     @classmethod
     def add(cls, guild_id: int, user_id: int, action: str, reason: str, moderator: str):
         key = cls._key(guild_id, user_id)
+
         def mutate(data):
             data.setdefault(key, []).append({
                 "action": action,
@@ -105,6 +109,7 @@ class SanctionManager:
                 "moderator": moderator,
                 "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
             })
+
         sanctions_store.update(mutate)
 
     @classmethod
@@ -115,10 +120,12 @@ class SanctionManager:
     def reset(cls, guild_id: int, user_id: int) -> bool:
         key = cls._key(guild_id, user_id)
         found = {"value": False}
+
         def mutate(data):
             if key in data:
                 del data[key]
                 found["value"] = True
+
         sanctions_store.update(mutate)
         return found["value"]
 
@@ -126,75 +133,78 @@ class SanctionManager:
     def remove_one(cls, guild_id: int, user_id: int, index: int):
         key = cls._key(guild_id, user_id)
         removed = {"value": None}
+
         def mutate(data):
             entries = data.get(key)
             if entries and 0 < index <= len(entries):
                 removed["value"] = entries.pop(index - 1)
                 if not entries:
                     del data[key]
+
         sanctions_store.update(mutate)
         return removed["value"]
 
 
 # ============================================================
-# TICKETS — Configuration
+# TICKETS — configuration par serveur
 # ============================================================
-
-class TicketManager:
+class TicketConfigManager:
+    @staticmethod
+    def get(guild_id: int) -> dict:
+        return ticket_store.read().get(str(guild_id), {})
 
     @staticmethod
-    def has_ticket(user_id: int):
-        data = tickets_store.read()
-        return str(user_id) in data
+    def set(guild_id: int, key: str, value):
+        gid = str(guild_id)
 
-    @staticmethod
-    def get(user_id: int):
-        return tickets_store.read().get(str(user_id))
+        def mutate(data):
+            data.setdefault(gid, {})[key] = value
 
-    @staticmethod
-    def create(user_id: int, channel_id: int):
-        def update(data):
-            data[str(user_id)] = {
-                "owner": user_id,
-                "channel": channel_id
-            }
+        ticket_store.update(mutate)
 
-        tickets_store.update(update)
 
-    @staticmethod
-    def delete(user_id: int):
-        def update(data):
-            data.pop(str(user_id), None)
+async def send_dm(user: discord.abc.User, embed: discord.Embed):
+    try:
+        await user.send(embed=embed)
+    except discord.HTTPException:
+        pass
 
-        tickets_store.update(update)
 
 # ============================================================
-# GIVEAWAYS
+# GIVEAWAYS — logique métier + boucle de fond
 # ============================================================
 class GiveawayManager:
     @staticmethod
     def all_running():
-        return {gid: g for gid, g in giveaway_store.read().items() if g.get("status") == "running"}
+        return {
+            gid: g for gid, g in giveaway_store.read().items()
+            if g.get("status") == "running"
+        }
 
     @staticmethod
     def save(message_id: int, data: dict):
         def mutate(store):
             store[str(message_id)] = data
+
         giveaway_store.update(mutate)
 
     @staticmethod
     def mark_ended(message_id: int):
         key = str(message_id)
+
         def mutate(store):
             if key in store:
                 store[key]["status"] = "ended"
+
         giveaway_store.update(mutate)
 
     @staticmethod
     def delete(message_id: int):
         key = str(message_id)
+
         def mutate(store):
             store.pop(key, None)
+
         giveaway_store.update(mutate)
 
     @staticmethod
@@ -229,12 +239,15 @@ class GiveawayManager:
         channel = guild.get_channel(g["channel_id"])
         if not channel:
             return
+
         try:
             message = await channel.fetch_message(message_id)
         except discord.NotFound:
             cls.delete(message_id)
             return
+
         winners = await cls.draw_winners(message, g["winners"])
+
         embed = discord.Embed(
             title="🎉 **GIVEAWAY TERMINÉ** 🎉",
             description=f"**{g['prize']}**\n\nHébergé par : {g['host']}",
@@ -247,20 +260,22 @@ class GiveawayManager:
         else:
             embed.add_field(name="🏆 Gagnant(s)", value="Aucun participant 😢", inline=False)
         embed.timestamp = datetime.fromtimestamp(g["end_timestamp"])
+
         await message.edit(embed=embed, view=None)
         if winners:
             mentions = ", ".join(w.mention for w in winners)
             await channel.send(f"🎉 **Félicitations {mentions} !** Vous avez gagné **{g['prize']}** !")
+
         cls.mark_ended(message_id)
 
 
 # ============================================================
-# UI — GIVEAWAY
+# UI — PANNEAU DE CRÉATION DE GIVEAWAY
 # ============================================================
 class GiveawayDureeModal(discord.ui.Modal, title="⏳ Durée du giveaway"):
     duree = TextInput(label="Durée (ex: 30s, 5m, 2h, 1d)", placeholder="30s, 5m, 2h, 1d...", max_length=10)
 
-    def __init__(self, parent):
+    def __init__(self, parent: "GiveawaySetupView"):
         super().__init__()
         self.parent = parent
 
@@ -277,7 +292,7 @@ class GiveawayDureeModal(discord.ui.Modal, title="⏳ Durée du giveaway"):
 class GiveawayGagnantsModal(discord.ui.Modal, title="👥 Nombre de gagnants"):
     gagnants = TextInput(label="Nombre de gagnants", placeholder="1, 2, 3, 5...", max_length=3)
 
-    def __init__(self, parent):
+    def __init__(self, parent: "GiveawaySetupView"):
         super().__init__()
         self.parent = parent
 
@@ -297,7 +312,7 @@ class GiveawayGagnantsModal(discord.ui.Modal, title="👥 Nombre de gagnants"):
 class GiveawayPrixModal(discord.ui.Modal, title="🎁 Prix du giveaway"):
     prix = TextInput(label="Prix à gagner", placeholder="Nitro Classic, 50€, Role exclusif...", max_length=100)
 
-    def __init__(self, parent):
+    def __init__(self, parent: "GiveawaySetupView"):
         super().__init__()
         self.parent = parent
 
@@ -336,14 +351,18 @@ class GiveawaySetupView(discord.ui.View):
     async def set_salon(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if not self._guard(interaction):
             return await interaction.response.send_message("❌ Ce n'est pas ton panneau.", ephemeral=True)
+
         await interaction.response.send_message("📢 **Mentionne le salon** où envoyer le giveaway :", ephemeral=True)
+
         def check(m):
             return m.author == self.ctx.author and m.channel == self.ctx.channel
+
         try:
             msg = await self.ctx.bot.wait_for("message", timeout=30, check=check)
         except asyncio.TimeoutError:
             await interaction.edit_original_response(content="⏰ Temps écoulé.", embed=self.build_embed(), view=self)
             return
+
         if msg.channel_mentions:
             self.salon = msg.channel_mentions[0]
             await msg.delete()
@@ -379,17 +398,26 @@ class GiveawaySetupView(discord.ui.View):
             return await interaction.response.send_message("❌ Configure d'abord la durée.", ephemeral=True)
         if self.prix == "Non défini":
             return await interaction.response.send_message("❌ Configure d'abord le prix.", ephemeral=True)
+
         await interaction.response.defer()
+
         end_timestamp = (datetime.now() + timedelta(seconds=self.duree_seconds)).timestamp()
         embed = discord.Embed(
             title="🎉 **GIVEAWAY** 🎉",
-            description=f"**{self.prix}**\n\n🎁 **Gagnant(s) :** {self.gagnants}\n⏳ **Se termine :** <t:{int(end_timestamp)}:R>\n🛡️ **Hébergé par :** {self.ctx.author.mention}",
+            description=(
+                f"**{self.prix}**\n\n"
+                f"🎁 **Gagnant(s) :** {self.gagnants}\n"
+                f"⏳ **Se termine :** <t:{int(end_timestamp)}:R>\n"
+                f"🛡️ **Hébergé par :** {self.ctx.author.mention}"
+            ),
             color=COLORS["giveaway"],
         )
         embed.set_footer(text="Clique sur 🎉 pour participer !")
         embed.timestamp = datetime.fromtimestamp(end_timestamp)
+
         msg = await self.salon.send(embed=embed)
         await msg.add_reaction("🎉")
+
         GiveawayManager.save(msg.id, {
             "guild_id": self.ctx.guild.id,
             "channel_id": self.salon.id,
@@ -399,6 +427,7 @@ class GiveawaySetupView(discord.ui.View):
             "end_timestamp": end_timestamp,
             "status": "running",
         })
+
         confirm = discord.Embed(
             title="✅ Giveaway lancé !",
             description=f"Giveaway envoyé dans {self.salon.mention}",
@@ -419,15 +448,19 @@ class GiveawaySetupView(discord.ui.View):
 
 
 # ============================================================
-# TICKETS — Système complet CORRIGÉ
+# UI — TICKETS
 # ============================================================
+TICKET_TOPICS = [
+    discord.SelectOption(label="🔨 Contactez le staff", description="Poser une question au staff ou autre...", emoji=" "),
+    discord.SelectOption(label="🤝 Partenariat", description="Demande un partenaritat...", emoji=" "),
+    discord.SelectOption(label="📩 Autre...", description="Autre demande non inclus...", emoji=" "),
+]
+
 
 class TicketDescriptionModal(discord.ui.Modal, title="📝 Ouvrir un ticket"):
     description = TextInput(
-        label="Description",
-        placeholder="Explique brièvement ta demande...",
-        style=discord.TextStyle.long,
-        max_length=2000,
+        label="Description", placeholder="Explique brièvement ta demande...",
+        style=discord.TextStyle.long, max_length=2000,
     )
 
     def __init__(self, sujet: str):
@@ -448,31 +481,28 @@ class TicketDescriptionModal(discord.ui.Modal, title="📝 Ouvrir un ticket"):
             await interaction.response.send_message("❌ Tu as déjà un ticket ouvert.", ephemeral=True)
             return
 
-        staff_role_ids = cfg.get("staff_role_ids", [])
-        staff_roles = [guild.get_role(rid) for rid in staff_role_ids if guild.get_role(rid)]
-
+        staff_role = guild.get_role(cfg.get("staff_role_id")) if cfg.get("staff_role_id") else None
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
             guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
         }
-        for role in staff_roles:
-            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        if staff_role:
+            overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
         chan = await guild.create_text_channel(
-            name=chan_name, category=category, overwrites=overwrites,
-            reason=f"Ticket de {user}",
+            name=chan_name, category=category, overwrites=overwrites, reason=f"Ticket de {user}",
         )
 
         ticket_msg = cfg.get("ticket_message", "🎫 **Bienvenue !** Un membre du staff va vous répondre.")
         embed = discord.Embed(title="🎫 Nouveau ticket", description=ticket_msg, color=COLORS["ticket"])
         embed.add_field(name="👤 Utilisateur", value=user.mention, inline=True)
         embed.add_field(name="🎯 Sujet", value=self.sujet, inline=True)
-        if staff_roles:
-            embed.add_field(name="👥 Staff", value=", ".join(r.mention for r in staff_roles), inline=True)
+        if staff_role:
+            embed.add_field(name="👥 Staff", value=staff_role.mention, inline=True)
         embed.set_footer(text="Utilise +close ou le bouton pour fermer le ticket")
 
-        mention_staff = " ".join(r.mention for r in staff_roles) if staff_roles else "@staff"
+        mention_staff = staff_role.mention if staff_role else "@staff"
         await chan.send(content=f"{user.mention} — {mention_staff}", embed=embed, view=CloseTicketView())
 
         if self.description.value:
@@ -480,14 +510,6 @@ class TicketDescriptionModal(discord.ui.Modal, title="📝 Ouvrir un ticket"):
             await chan.send(embed=desc_embed)
 
         await interaction.response.send_message(f"✅ Ton ticket a été créé : {chan.mention}", ephemeral=True)
-
-
-# Sujets de tickets
-TICKET_TOPICS = [
-    discord.SelectOption(label="🔨 Contactez le staff", description="Poser une question au staff ou autre...", emoji=" "),
-    discord.SelectOption(label="🤝 Partenariat", description="Demande de partenariat...", emoji=" "),
-    discord.SelectOption(label="📩 Autre...", description="Autre demande non inclus...", emoji=" "),
-]
 
 
 class TicketSubjectSelect(discord.ui.View):
@@ -531,10 +553,8 @@ class CloseTicketView(discord.ui.View):
 
 class TicketMessageModal(discord.ui.Modal, title="Modifier le message du ticket"):
     message = TextInput(
-        label="Message de bienvenue",
-        style=discord.TextStyle.long,
-        placeholder="🎫 Bienvenue dans votre ticket ! Un membre du staff va vous répondre.",
-        max_length=4000,
+        label="Message de bienvenue", style=discord.TextStyle.long,
+        placeholder="🎫 Bienvenue dans votre ticket ! Un membre du staff va vous répondre.", max_length=4000,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -548,78 +568,54 @@ class TicketMessageModal(discord.ui.Modal, title="Modifier le message du ticket"
 
 
 class ConfigPanelView(discord.ui.View):
-    """Panneau de configuration interactif CORRIGÉ"""
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=300)
         self.guild = guild
 
-    @discord.ui.select(
-        cls=ChannelSelect,
-        channel_types=[discord.ChannelType.category],
-        placeholder="📂 Choisir la catégorie des tickets..."
-    )
+    @discord.ui.select(cls=ChannelSelect, channel_types=[discord.ChannelType.category],
+                        placeholder="📂 Choisir la catégorie des tickets...")
     async def select_category(self, interaction: discord.Interaction, select: ChannelSelect):
         category = select.values[0]
         TicketConfigManager.set(interaction.guild_id, "category_id", category.id)
-        
-        embed = discord.Embed(
-            title="✅ Catégorie définie",
-            description=f"Catégorie : {category.mention}",
-            color=discord.Color.green()
-        )
-        # Éditer le message original pour confirmer
+        embed = discord.Embed(title="✅ Catégorie définie", description=f"Catégorie : {category.mention}", color=discord.Color.green())
         await interaction.response.edit_message(embed=embed, view=self)
         await interaction.followup.send("✅ Catégorie sauvegardée !", ephemeral=True)
 
-    @discord.ui.select(
-        cls=RoleSelect,
-        placeholder="👥 Choisir le rôle staff (max 3)...",
-        min_values=1,
-        max_values=3
-    )
+    @discord.ui.select(cls=RoleSelect, placeholder="👥 Choisir le rôle staff...")
     async def select_role(self, interaction: discord.Interaction, select: RoleSelect):
-        roles = select.values
-        role_ids = [r.id for r in roles]
-        TicketConfigManager.set(interaction.guild_id, "staff_role_ids", role_ids)
-        
-        embed = discord.Embed(
-            title="✅ Rôles staff définis",
-            description=", ".join(r.mention for r in roles),
-            color=discord.Color.green()
-        )
+        role = select.values[0]
+        TicketConfigManager.set(interaction.guild_id, "staff_role_id", role.id)
+        embed = discord.Embed(title="✅ Rôle staff défini", description=f"Rôle : {role.mention}", color=discord.Color.green())
         await interaction.response.edit_message(embed=embed, view=self)
-        await interaction.followup.send("✅ Rôles sauvegardés !", ephemeral=True)
+        await interaction.followup.send("✅ Rôle sauvegardé !", ephemeral=True)
 
-    @discord.ui.button(label="✏️ Modifier le message du ticket", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="✏️ Modifier le message du ticket", style=discord.ButtonStyle.secondary)
     async def edit_message(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await interaction.response.send_modal(TicketMessageModal())
 
-    @discord.ui.button(label="📤 Envoyer le bouton ticket", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="📤 Envoyer le bouton ticket", style=discord.ButtonStyle.success)
     async def send_ticket_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
         cfg = TicketConfigManager.get(interaction.guild_id)
         if not cfg.get("category_id"):
             await interaction.response.send_message("❌ Configure d'abord la catégorie !", ephemeral=True)
             return
-        
-        embed = build_ticket_intro_embed()
-        await interaction.channel.send(embed=embed, view=TicketView())
+        await interaction.channel.send(embed=build_ticket_intro_embed(), view=TicketView())
         await interaction.response.send_message("✅ Bouton ticket envoyé !", ephemeral=True)
 
-    @discord.ui.button(label="📊 Voir la config actuelle", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="📊 Voir la config actuelle", style=discord.ButtonStyle.secondary)
     async def show_config(self, interaction: discord.Interaction, _button: discord.ui.Button):
         cfg = TicketConfigManager.get(interaction.guild_id)
         category = discord.utils.get(self.guild.categories, id=cfg.get("category_id"))
-        role_ids = cfg.get("staff_role_ids", [])
-        roles = [self.guild.get_role(rid) for rid in role_ids if self.guild.get_role(rid)]
+        role = self.guild.get_role(cfg.get("staff_role_id")) if cfg.get("staff_role_id") else None
         msg = cfg.get("ticket_message", "Message par défaut")
 
         embed = discord.Embed(title="📊 Configuration actuelle", color=COLORS["ticket"])
         embed.add_field(name="Catégorie", value=category.mention if category else "❌ Non définie", inline=False)
-        embed.add_field(name="Rôles staff", value=", ".join(r.mention for r in roles) if roles else "❌ Non définis", inline=False)
+        embed.add_field(name="Rôle staff", value=role.mention if role else "❌ Non défini", inline=False)
         embed.add_field(name="Message", value=(msg[:100] + "...") if len(msg) > 100 else msg, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="❌ Fermer le panneau", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="❌ Fermer le panneau", style=discord.ButtonStyle.danger)
     async def close_panel(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await interaction.message.delete()
         await interaction.response.send_message("🔧 Panneau fermé.", ephemeral=True)
@@ -995,14 +991,13 @@ async def close(ctx: commands.Context):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def panel(ctx: commands.Context):
-    """Panneau de configuration interactif des tickets"""
     embed = discord.Embed(
         title="🛠️ Panneau de configuration — Tickets",
         description="Configure le système de tickets en utilisant les menus ci-dessous.",
         color=COLORS["ticket"],
     )
     embed.add_field(name="📂 Catégorie", value="Choisis la catégorie où les tickets seront créés", inline=False)
-    embed.add_field(name="👥 Rôle staff", value="Choisis le(s) rôle(s) qui pourra(ont) voir et gérer les tickets", inline=False)
+    embed.add_field(name="👥 Rôle staff", value="Choisis le rôle qui pourra voir et gérer les tickets", inline=False)
     embed.add_field(name="✏️ Message", value="Personnalise le message de bienvenue dans les tickets", inline=False)
     embed.set_footer(text="Panneau de configuration • +help pour l'aide")
     await ctx.send(embed=embed, view=ConfigPanelView(ctx.guild))
@@ -1033,8 +1028,6 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
         await ctx.send("❌ Membre introuvable.")
     elif isinstance(error, commands.BadArgument):
         await ctx.send("❌ Argument invalide.")
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Argument manquant. Utilise `{PREFIX}help` pour voir la syntaxe.")
     else:
         await ctx.send(f"❌ Erreur : {error}")
 
@@ -1048,7 +1041,6 @@ async def on_ready():
     print(f"📡 Serveurs : {len(bot.guilds)}")
     print(f"⚡ Préfixe : {PREFIX}")
 
-    # Ré-enregistrer les vues persistantes (boutons qui survivent au redémarrage)
     bot.add_view(TicketView())
     bot.add_view(CloseTicketView())
     bot.loop.create_task(GiveawayManager.loop())
