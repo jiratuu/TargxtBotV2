@@ -482,6 +482,10 @@ class TicketDescriptionModal(discord.ui.Modal, title="📝 Ouvrir un ticket"):
             return
 
         staff_role = guild.get_role(cfg.get("staff_role_id")) if cfg.get("staff_role_id") else None
+
+        # ✅ DEFFER d'abord pour éviter le timeout de 3 secondes
+        await interaction.response.defer(ephemeral=True)
+
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -509,14 +513,19 @@ class TicketDescriptionModal(discord.ui.Modal, title="📝 Ouvrir un ticket"):
             desc_embed = discord.Embed(title="📝 Description", description=self.description.value, color=discord.Color.light_grey())
             await chan.send(embed=desc_embed)
 
-        await interaction.response.send_message(f"✅ Ton ticket a été créé : {chan.mention}", ephemeral=True)
+        # ✅ followup au lieu de response.send_message (car on a déjà defer)
+        await interaction.followup.send(f"✅ Ton ticket a été créé : {chan.mention}", ephemeral=True)
 
 
 class TicketSubjectSelect(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
 
-    @discord.ui.select(placeholder="Choisis le sujet de ton ticket...", options=TICKET_TOPICS)
+    @discord.ui.select(
+        placeholder="Choisis le sujet de ton ticket...",
+        options=TICKET_TOPICS,
+        custom_id="ticket_subject_select"
+    )
     async def select_subject(self, interaction: discord.Interaction, select: discord.ui.Select):
         await interaction.response.send_modal(TicketDescriptionModal(select.values[0]))
 
@@ -755,7 +764,7 @@ async def ban(ctx: commands.Context, member: discord.Member, *, reason="Aucune r
     embed.set_footer(text=datetime.now().strftime("%d/%m/%Y %H:%M"))
     await ctx.send(embed=embed)
 
-    dm = discord.Embed(title=f"🔨 Bannissement — {ctx.guild.name}", description="Tu as été banni.", color=COLORS["ban"])
+    dm = discord.Embed(title=f"🔨 Bannissement — {ctx.guild.name}", description="Tu as été banni de [TARGXT] #LEAK. Pour contester rejoins ce serveur : https://discord.gg/7YnttqCX", color=COLORS["ban"])
     dm.add_field(name="Raison", value=reason, inline=False)
     dm.add_field(name="Modérateur", value=str(ctx.author), inline=False)
     dm.set_footer(text=datetime.now().strftime("%d/%m/%Y %H:%M"))
@@ -776,7 +785,7 @@ async def on_member_ban(guild: discord.Guild, user: discord.abc.User):
 
     SanctionManager.add(guild.id, user.id, "🔨 Ban (externe)", reason, moderator)
 
-    dm = discord.Embed(title=f"🔨 Bannissement — {guild.name}", description="Tu as été banni.", color=COLORS["ban"])
+    dm = discord.Embed(title=f"🔨 Bannissement — {guild.name}", description="Tu as été banni de [TARGXT] #LEAK. Pour contester rejoins ce serveur : https://discord.gg/7YnttqCX", color=COLORS["ban"])
     dm.add_field(name="Raison", value=reason, inline=False)
     dm.add_field(name="Modérateur", value=moderator, inline=False)
     dm.set_footer(text=datetime.now().strftime("%d/%m/%Y %H:%M"))
@@ -1043,6 +1052,7 @@ async def on_ready():
 
     bot.add_view(TicketView())
     bot.add_view(CloseTicketView())
+    bot.add_view(TicketSubjectSelect())
     bot.loop.create_task(GiveawayManager.loop())
 
 
