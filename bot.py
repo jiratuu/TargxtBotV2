@@ -162,6 +162,36 @@ class TicketConfigManager:
 
         ticket_store.update(mutate)
 
+    @staticmethod
+    def add_staff_role(guild_id: int, role_id: int):
+        gid = str(guild_id)
+
+        def mutate(data):
+            data.setdefault(gid, {})
+            roles = data[gid].get("staff_role_ids", [])
+            if role_id not in roles:
+                roles.append(role_id)
+            data[gid]["staff_role_ids"] = roles
+
+        ticket_store.update(mutate)
+
+    @staticmethod
+    def remove_staff_role(guild_id: int, role_id: int):
+        gid = str(guild_id)
+
+        def mutate(data):
+            data.setdefault(gid, {})
+            roles = data[gid].get("staff_role_ids", [])
+            if role_id in roles:
+                roles.remove(role_id)
+            data[gid]["staff_role_ids"] = roles
+
+        ticket_store.update(mutate)
+
+    @staticmethod
+    def get_staff_roles(guild_id: int) -> list:
+        return TicketConfigManager.get(guild_id).get("staff_role_ids", [])
+
 
 async def send_dm(user: discord.abc.User, embed: discord.Embed):
     try:
@@ -448,12 +478,12 @@ class GiveawaySetupView(discord.ui.View):
 
 
 # ============================================================
-# UI — TICKETS
+# UI — TICKETS (style DraftBot)
 # ============================================================
 TICKET_TOPICS = [
-    discord.SelectOption(label="🔨 Contactez le staff", description="Poser une question au staff ou autre...", emoji=" "),
-    discord.SelectOption(label="🤝 Partenariat", description="Demande un partenaritat...", emoji=" "),
-    discord.SelectOption(label="📩 Autre...", description="Autre demande non inclus...", emoji=" "),
+    discord.SelectOption(label="🔨 Contactez le staff", description="Poser une question au staff ou autre...", emoji="🔨"),
+    discord.SelectOption(label="🤝 Partenariat", description="Demande un partenariat...", emoji="🤝"),
+    discord.SelectOption(label="📩 Autre...", description="Autre demande non inclus...", emoji="📩"),
 ]
 
 
@@ -481,40 +511,66 @@ class TicketDescriptionModal(discord.ui.Modal, title="📝 Ouvrir un ticket"):
             await interaction.response.send_message("❌ Tu as déjà un ticket ouvert.", ephemeral=True)
             return
 
-        staff_role = guild.get_role(cfg.get("staff_role_id")) if cfg.get("staff_role_id") else None
+        staff_role_ids = TicketConfigManager.get_staff_roles(guild.id)
+        
+        # Répondre immédiatement pour éviter le timeout
+        await interaction.response.send_message("⏳ Création de ton ticket en cours...", ephemeral=True)
 
-        # ✅ DEFFER d'abord pour éviter le timeout de 3 secondes
-        await interaction.response.defer(ephemeral=True)
-
+        # Préparer les overwrites
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
             guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
         }
-        if staff_role:
-            overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        
+        # Ajouter tous les rôles staff
+        for role_id in staff_role_ids:
+            role = guild.get_role(role_id)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
-        chan = await guild.create_text_channel(
-            name=chan_name, category=category, overwrites=overwrites, reason=f"Ticket de {user}",
-        )
+        # Création du salon (peut prendre du temps)
+        try:
+            chan = await guild.create_text_channel(
+                name=chan_name, category=category, overwrites=overwrites, reason=f"Ticket de {user}",
+            )
+        except discord.Forbidden:
+            await interaction.edit_original_response(content="❌ Je n'ai pas la permission de créer des salons.")
+            return
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Erreur : {e}")
+            return
 
         ticket_msg = cfg.get("ticket_message", "🎫 **Bienvenue !** Un membre du staff va vous répondre.")
+        
+        # Construire le message du salon
+        staff_mentions = []
+        for role_id in staff_role_ids:
+            role = guild.get_role(role_id)
+            if role:
+                staff_mentions.append(role.mention)
+        
+        mention_staff = " ".join(staff_mentions) if staff_mentions else "@staff"
+
         embed = discord.Embed(title="🎫 Nouveau ticket", description=ticket_msg, color=COLORS["ticket"])
         embed.add_field(name="👤 Utilisateur", value=user.mention, inline=True)
         embed.add_field(name="🎯 Sujet", value=self.sujet, inline=True)
-        if staff_role:
-            embed.add_field(name="👥 Staff", value=staff_role.mention, inline=True)
-        embed.set_footer(text="Utilise +close ou le bouton pour fermer le ticket")
+        if staff_mentions:
+            embed.add_field(name="👥 Staff", value=", ".join(staff_mentions), inline=True)
+        embed.set_footer(text="Utilise le bouton ci-dessous pour fermer le ticket")
 
-        mention_staff = staff_role.mention if staff_role else "@staff"
+        embed2 = discord.Embed(
+            title="📝 Description du ticket",
+            description=self.description.value if self.description.value else "Aucune description fournie",
+            color=discord.Color.light_grey()
+        )
+
+        # Envoyer les messages dans le nouveau salon
         await chan.send(content=f"{user.mention} — {mention_staff}", embed=embed, view=CloseTicketView())
+        await chan.send(embed=embed2)
 
-        if self.description.value:
-            desc_embed = discord.Embed(title="📝 Description", description=self.description.value, color=discord.Color.light_grey())
-            await chan.send(embed=desc_embed)
-
-        # ✅ followup au lieu de response.send_message (car on a déjà defer)
-        await interaction.followup.send(f"✅ Ton ticket a été créé : {chan.mention}", ephemeral=True)
+        # Modifier la réponse éphémère
+        await interaction.edit_original_response(content=f"✅ Ton ticket a été créé : {chan.mention}")
 
 
 class TicketSubjectSelect(discord.ui.View):
@@ -554,10 +610,28 @@ class CloseTicketView(discord.ui.View):
 
     @discord.ui.button(label="🔒 Fermer le ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket")
     async def close_ticket(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        embed = discord.Embed(title="🔒 Fermeture", description="Fermeture dans 5 secondes...", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed)
+        # Demander confirmation avec un bouton
+        await interaction.response.send_message(
+            "⚠️ **Confirmer la fermeture ?**",
+            view=ConfirmCloseView(interaction.channel),
+            ephemeral=True
+        )
+
+
+class ConfirmCloseView(discord.ui.View):
+    def __init__(self, channel):
+        super().__init__(timeout=30)
+        self.channel = channel
+
+    @discord.ui.button(label="✅ Oui, fermer", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.send_message("🔒 Fermeture dans 5 secondes...")
         await asyncio.sleep(5)
-        await interaction.channel.delete(reason=f"Fermé par {interaction.user}")
+        await self.channel.delete(reason=f"Fermé par {interaction.user}")
+
+    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.edit_message(content="✅ Fermeture annulée.", view=None)
 
 
 class TicketMessageModal(discord.ui.Modal, title="Modifier le message du ticket"):
@@ -576,6 +650,42 @@ class TicketMessageModal(discord.ui.Modal, title="Modifier le message du ticket"
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+class AddStaffRoleSelect(discord.ui.View):
+    def __init__(self, guild):
+        super().__init__(timeout=120)
+        self.guild = guild
+
+    @discord.ui.select(cls=RoleSelect, placeholder="👥 Ajouter un rôle staff...", custom_id="add_staff_role_select")
+    async def select_role(self, interaction: discord.Interaction, select: RoleSelect):
+        role = select.values[0]
+        TicketConfigManager.add_staff_role(interaction.guild_id, role.id)
+        await interaction.response.send_message(f"✅ Rôle {role.mention} ajouté aux rôles staff !", ephemeral=True)
+
+
+class RemoveStaffRoleSelect(discord.ui.View):
+    def __init__(self, guild):
+        super().__init__(timeout=120)
+        self.guild = guild
+        self.options = []
+        staff_role_ids = TicketConfigManager.get_staff_roles(guild.id)
+        for rid in staff_role_ids:
+            role = guild.get_role(rid)
+            if role:
+                self.options.append(discord.SelectOption(label=role.name, value=str(role.id)))
+        
+        if self.options:
+            self.remove_role_select.options = self.options
+        else:
+            self.remove_role_select.options = [discord.SelectOption(label="Aucun rôle staff", value="none")]
+
+    @discord.ui.select(placeholder="🗑️ Retirer un rôle staff...", custom_id="remove_staff_role_select")
+    async def remove_role_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        role_id = int(select.values[0])
+        TicketConfigManager.remove_staff_role(interaction.guild_id, role_id)
+        role = self.guild.get_role(role_id)
+        await interaction.response.send_message(f"✅ Rôle {role.mention if role else role_id} retiré des rôles staff !", ephemeral=True)
+
+
 class ConfigPanelView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=300)
@@ -590,19 +700,31 @@ class ConfigPanelView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
         await interaction.followup.send("✅ Catégorie sauvegardée !", ephemeral=True)
 
-    @discord.ui.select(cls=RoleSelect, placeholder="👥 Choisir le rôle staff...")
-    async def select_role(self, interaction: discord.Interaction, select: RoleSelect):
-        role = select.values[0]
-        TicketConfigManager.set(interaction.guild_id, "staff_role_id", role.id)
-        embed = discord.Embed(title="✅ Rôle staff défini", description=f"Rôle : {role.mention}", color=discord.Color.green())
-        await interaction.response.edit_message(embed=embed, view=self)
-        await interaction.followup.send("✅ Rôle sauvegardé !", ephemeral=True)
+    @discord.ui.button(label="➕ Ajouter un rôle staff", style=discord.ButtonStyle.success, row=1)
+    async def add_staff_role(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.send_message(
+            "👥 Sélectionne un rôle à ajouter comme staff :",
+            view=AddStaffRoleSelect(self.guild),
+            ephemeral=True
+        )
 
-    @discord.ui.button(label="✏️ Modifier le message du ticket", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="➖ Retirer un rôle staff", style=discord.ButtonStyle.danger, row=1)
+    async def remove_staff_role(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        staff_role_ids = TicketConfigManager.get_staff_roles(interaction.guild_id)
+        if not staff_role_ids:
+            await interaction.response.send_message("❌ Aucun rôle staff configuré.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "🗑️ Sélectionne un rôle à retirer :",
+            view=RemoveStaffRoleSelect(self.guild),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="✏️ Modifier le message du ticket", style=discord.ButtonStyle.secondary, row=1)
     async def edit_message(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await interaction.response.send_modal(TicketMessageModal())
 
-    @discord.ui.button(label="📤 Envoyer le bouton ticket", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="📤 Envoyer le bouton ticket", style=discord.ButtonStyle.success, row=2)
     async def send_ticket_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
         cfg = TicketConfigManager.get(interaction.guild_id)
         if not cfg.get("category_id"):
@@ -611,20 +733,24 @@ class ConfigPanelView(discord.ui.View):
         await interaction.channel.send(embed=build_ticket_intro_embed(), view=TicketView())
         await interaction.response.send_message("✅ Bouton ticket envoyé !", ephemeral=True)
 
-    @discord.ui.button(label="📊 Voir la config actuelle", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="📊 Voir la config actuelle", style=discord.ButtonStyle.secondary, row=2)
     async def show_config(self, interaction: discord.Interaction, _button: discord.ui.Button):
         cfg = TicketConfigManager.get(interaction.guild_id)
         category = discord.utils.get(self.guild.categories, id=cfg.get("category_id"))
-        role = self.guild.get_role(cfg.get("staff_role_id")) if cfg.get("staff_role_id") else None
+        staff_role_ids = TicketConfigManager.get_staff_roles(interaction.guild_id)
+        staff_roles = [self.guild.get_role(rid) for rid in staff_role_ids if self.guild.get_role(rid)]
         msg = cfg.get("ticket_message", "Message par défaut")
 
         embed = discord.Embed(title="📊 Configuration actuelle", color=COLORS["ticket"])
-        embed.add_field(name="Catégorie", value=category.mention if category else "❌ Non définie", inline=False)
-        embed.add_field(name="Rôle staff", value=role.mention if role else "❌ Non défini", inline=False)
-        embed.add_field(name="Message", value=(msg[:100] + "...") if len(msg) > 100 else msg, inline=False)
+        embed.add_field(name="📂 Catégorie", value=category.mention if category else "❌ Non définie", inline=False)
+        
+        roles_str = "\n".join([r.mention for r in staff_roles]) if staff_roles else "❌ Aucun rôle staff"
+        embed.add_field(name="👥 Rôles staff", value=roles_str, inline=False)
+        embed.add_field(name="✏️ Message", value=(msg[:100] + "...") if len(msg) > 100 else msg, inline=False)
+        
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="❌ Fermer le panneau", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="❌ Fermer le panneau", style=discord.ButtonStyle.danger, row=2)
     async def close_panel(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await interaction.message.delete()
         await interaction.response.send_message("🔧 Panneau fermé.", ephemeral=True)
@@ -992,7 +1118,14 @@ async def close(ctx: commands.Context):
     if not ctx.channel.name.startswith("ticket-"):
         await ctx.send("❌ Cette commande doit être utilisée dans un salon de ticket.")
         return
-    await ctx.send(embed=discord.Embed(title="🔒 Fermeture", description="Fermeture dans 5 secondes...", color=discord.Color.red()))
+    
+    # Demander confirmation
+    embed = discord.Embed(
+        title="🔒 Confirmer la fermeture ?",
+        description="⚠️ Ce ticket va être fermé dans 5 secondes.",
+        color=discord.Color.red()
+    )
+    await ctx.send(embed=embed)
     await asyncio.sleep(5)
     await ctx.channel.delete(reason=f"Fermé par {ctx.author}")
 
@@ -1006,7 +1139,7 @@ async def panel(ctx: commands.Context):
         color=COLORS["ticket"],
     )
     embed.add_field(name="📂 Catégorie", value="Choisis la catégorie où les tickets seront créés", inline=False)
-    embed.add_field(name="👥 Rôle staff", value="Choisis le rôle qui pourra voir et gérer les tickets", inline=False)
+    embed.add_field(name="👥 Rôles staff", value="Ajoute ou retire les rôles qui gérent les tickets (jusqu'à 5 rôles)", inline=False)
     embed.add_field(name="✏️ Message", value="Personnalise le message de bienvenue dans les tickets", inline=False)
     embed.set_footer(text="Panneau de configuration • +help pour l'aide")
     await ctx.send(embed=embed, view=ConfigPanelView(ctx.guild))
@@ -1053,6 +1186,8 @@ async def on_ready():
     bot.add_view(TicketView())
     bot.add_view(CloseTicketView())
     bot.add_view(TicketSubjectSelect())
+    bot.add_view(AddStaffRoleSelect(None))
+    bot.add_view(RemoveStaffRoleSelect(None))
     bot.loop.create_task(GiveawayManager.loop())
 
 
